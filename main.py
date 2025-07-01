@@ -16,7 +16,7 @@ HEADERS = {
     "Cookie": f".ROBLOSECURITY={ROBLOSECURITY}"
 }
 
-USERNAMES = ["9Dcx", "AnotherUsername"]
+USERNAMES = ["9Dcx", "bjkqt1"]
 
 def get_user_id(username):
     resp = requests.post(
