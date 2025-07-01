@@ -1,106 +1,84 @@
-import time
-import threading
-import requests
+import time, threading, requests
+from datetime import datetime
 from dotenv import load_dotenv
 import os
 from keep_alive import keep_alive
 
 load_dotenv()
-
-DISCORD_WEBHOOK = os.getenv("WEB")
+WEBHOOK = os.getenv("WEB")
 ROBLOSECURITY = os.getenv("ROBLOSECURITY")
-COOLDOWN = 5  # seconds
+COOLDOWN = 5
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "Cookie": f".ROBLOSECURITY={ROBLOSECURITY}"
-}
+HEADERS = {"Content-Type":"application/json","Cookie":f".ROBLOSECURITY={ROBLOSECURITY}"}
+USERNAMES = ["9Dcx","bjkqt1","mwaochaa"]
 
-# List of usernames to monitor
-USERNAMES = ["9Dcx", "mwaochaa", "cunyimageholder", "Darkcrystal441", "bjkqt1"]
+def get_user_id(name):
+    resp = requests.post("https://users.roblox.com/v1/usernames/users",
+                         json={"usernames":[name],"excludeBannedUsers":False}, headers=HEADERS)
+    resp.raise_for_status()
+    data = resp.json().get("data",[])
+    return data[0]["id"] if data else None
 
-def get_user_id(username):
-    try:
-        response = requests.post(
-            "https://users.roblox.com/v1/usernames/users",
-            json={"usernames": [username]},
-            headers=HEADERS
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["data"][0]["id"] if data["data"] else None
-    except Exception as e:
-        print(f"Failed to get user ID for {username}:", e)
-        return None
+def check_presence(uid):
+    resp = requests.post("https://presence.roblox.com/v1/presence/users",
+                         json={"userIds":[uid]}, headers=HEADERS)
+    resp.raise_for_status()
+    return resp.json()["userPresences"][0]
 
-def check_presence(user_id):
-    response = requests.post(
-        "https://presence.roblox.com/v1/presence/users",
-        json={"userIds": [user_id]},
-        headers=HEADERS
-    )
-    response.raise_for_status()
-    return response.json()["userPresences"][0]
+def get_game_name(place_id):
+    resp = requests.get(f"https://games.roblox.com/v1/games?universeIds={place_id}")
+    if resp.ok:
+        info = resp.json().get("data",[])
+        return info[0].get("name") if info else None
+    return None
 
-def notify_discord(username, status_code, place_id=None, event_type="Status Changed"):
-    status_names = ["Offline", "Online on Website", "In Game", "In Studio", "Invisible"]
-    status = status_names[status_code] if status_code < len(status_names) else f"Unknown ({status_code})"
+def send_embed(username, event, status_code, place_id, start_time, end_time):
+    status_names=["Offline","Online","In Game","In Studio","Invisible"]
+    status=status_names[status_code] if status_code<len(status_names) else f"Unknown({status_code})"
+    now = datetime.utcnow()
+    duration = f"{(now - start_time).seconds // 60}m {(now - start_time).seconds % 60}s" if start_time else "N/A"
+    embed={"title":f"{username} – {event}",
+           "color":0x00ff00 if status_code else 0xff0000,
+           "fields":[
+             {"name":"New Status","value":status,"inline":True},
+             {"name":"Since","value":start_time.strftime('%Y-%m-%d %H:%M:%S UTC'),"inline":True},
+             {"name":"Duration","value":duration,"inline":True}],
+           "footer":{"text":"Advanced Roblox Tracker"}}
+    if status_code==2 and place_id:
+        name=get_game_name(place_id)
+        url=f"https://www.roblox.com/games/{place_id}"
+        embed["fields"] += [
+          {"name":"Game","value":name or "Unknown","inline":True},
+          {"name":"Link","value":f"[Enter Game]({url})","inline":False}]
+    requests.post(WEBHOOK, json={"embeds":[embed]})
 
-    embed = {
-        "title": f"{username} - {event_type}",
-        "color": 0x00ff00 if status_code != 0 else 0xff0000,
-        "fields": [{"name": "Status", "value": status, "inline": True}],
-        "footer": {"text": "Roblox Activity Tracker"}
-    }
-
-    if status_code == 2 and place_id:
-        game_url = f"https://www.roblox.com/games/{place_id}"
-        embed["fields"].append({
-            "name": "Game Link",
-            "value": f"[Click to Join Game]({game_url})",
-            "inline": False
-        })
-
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
-        print(f"🔔 {username} - {event_type}: {status} (placeId={place_id})")
-    except Exception as e:
-        print("Failed to send Discord webhook:", e)
-
-def monitor_user(username):
-    user_id = get_user_id(username)
-    if not user_id:
-        print(f"❌ User {username} not found.")
-        return
-
-    last_status = None
-    last_place = None
-
+def monitor_user(name):
+    uid=get_user_id(name)
+    if not uid:
+        print(f"❌ {name} not found"); return
+    last_status=None; last_game=None; start_time=None
     while True:
         try:
-            presence = check_presence(user_id)
-            status = presence.get("userPresenceType", 0)
-            place_id = presence.get("placeId")
-
-            if status != last_status or place_id != last_place:
-                event = "Status Changed"
-                if status == 0:
-                    event = "User Went Offline"
-                elif last_status == 0 and status != 0:
-                    event = "User Came Online"
-                elif place_id and place_id != last_place:
-                    event = "Joined New Game"
-
-                notify_discord(username, status, place_id, event_type=event)
-                last_status = status
-                last_place = place_id
-
+            p=check_presence(uid)
+            s=p.get("userPresenceType",0)
+            g=p.get("placeId")
+            if s!=last_status or g!=last_game:
+                event="Status Changed"
+                if last_status is None: event="Tracker Started"
+                elif s==0: event="Went Offline"
+                elif last_status==0 and s!=0: event="Came Online"
+                elif g and g!=last_game: event="Joined New Game"
+                send_embed(name, event, s, g, datetime.utcnow(), None)
+                last_status,s_last = s,s
+                last_game,g_last = g,g
+                start_time=datetime.utcnow()
+            time.sleep(COOLDOWN)
         except Exception as e:
-            print(f"Monitor Error for {username}:", e)
+            print(f"Error {name}:",e)
+            time.sleep(COOLDOWN)
 
-        time.sleep(COOLDOWN)
-
-if __name__ == "__main__":
+if __name__=="__main__":
     keep_alive()
-    for username in USERNAMES:
-        threading.Thread(target=monitor_user, args=(username,)).start()
+    for u in USERNAMES:
+        threading.Thread(target=monitor_user,args=(u,),daemon=True).start()
+    while True: time.sleep(60)
