@@ -17,7 +17,7 @@ HEADERS = {
 }
 
 # List of usernames to monitor
-USERNAMES = ["9Dcx", "Username2", "Username3"]
+USERNAMES = ["9Dcx", "mwaochaa", "cunyimageholder"]
 
 def get_user_id(username):
     try:
