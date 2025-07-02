@@ -2,7 +2,7 @@ import os
 import time
 import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,13 +16,8 @@ HEADERS = {
     "Cookie": f".ROBLOSECURITY={ROBLOSECURITY}"
 }
 
-# Users to track
-USERNAMES = ["9Dcx", "bjkqt1"]
+USERNAMES = ["9Dcx", "rcpfc17"]
 
-# Maps usernames to tracking info
-user_tracking = {}
-
-# Roblox presence status codes
 STATUS_MAP = {
     0: "Offline",
     1: "Online on Website",
@@ -60,20 +55,20 @@ def get_game_info(universe_id):
         return "Unknown Game"
 
 def format_duration(seconds):
-    mins, secs = divmod(seconds, 60)
+    mins, secs = divmod(int(seconds), 60)
     hours, mins = divmod(mins, 60)
     return f"{hours}h {mins}m {secs}s"
 
 def send_discord_embed(username, user_id, event, presence, times):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     status = STATUS_MAP.get(presence.get("userPresenceType", 0), "Unknown")
     place_id = presence.get("placeId")
     universe_id = presence.get("universeId")
     game_id = presence.get("gameId")
 
-    duration_online = format_duration(int(times.get("online", 0)))
-    duration_offline = format_duration(int(times.get("offline", 0)))
-    duration_game = format_duration(int(times.get("game", 0)))
+    duration_online = format_duration(times.get("online", 0))
+    duration_offline = format_duration(times.get("offline", 0))
+    duration_game = format_duration(times.get("game", 0))
 
     fields = [
         {"name": "Event", "value": event, "inline": True},
@@ -115,30 +110,22 @@ def monitor_user(username):
         return
 
     last_presence_type = None
-    last_timestamp = datetime.utcnow()
+    last_timestamp = datetime.now(timezone.utc)
 
-    # Time tracking (seconds)
     times = {
         "online": 0,
         "offline": 0,
         "game": 0
     }
 
-    user_tracking[username] = {
-        "user_id": user_id,
-        "times": times,
-        "last_status": None
-    }
-
     while True:
         try:
             presence = check_presence(user_id)
             presence_type = presence.get("userPresenceType", 0)
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             delta = (current_time - last_timestamp).total_seconds()
             last_timestamp = current_time
 
-            # Time category update
             if presence_type == 0:
                 times["offline"] += delta
             else:
@@ -146,7 +133,6 @@ def monitor_user(username):
                 if presence_type == 2:
                     times["game"] += delta
 
-            # Trigger change event
             if presence_type != last_presence_type:
                 event = {
                     0: "Went Offline",
@@ -156,15 +142,14 @@ def monitor_user(username):
                 }.get(presence_type, "Status Changed")
 
                 send_discord_embed(username, user_id, event, presence, times)
-
                 last_presence_type = presence_type
 
         except Exception as e:
-            print(f"Error tracking {username}: {e}")
+            print(f"[ERROR] {username} → {e}")
 
         time.sleep(COOLDOWN)
 
-# Launch threads for each user
+# Launch all threads
 if __name__ == "__main__":
     for user in USERNAMES:
         threading.Thread(target=monitor_user, args=(user,), daemon=True).start()
