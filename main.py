@@ -16,53 +16,77 @@ HEADERS = {
     "Cookie": f".ROBLOSECURITY={ROBLOSECURITY}"
 }
 
+# Users to track
 USERNAMES = ["9Dcx", "bjkqt1"]
 
+# Maps usernames to tracking info
+user_tracking = {}
+
+# Roblox presence status codes
+STATUS_MAP = {
+    0: "Offline",
+    1: "Online on Website",
+    2: "In Game",
+    3: "In Studio",
+    4: "Invisible"
+}
+
 def get_user_id(username):
-    resp = requests.post(
+    response = requests.post(
         "https://users.roblox.com/v1/usernames/users",
         json={"usernames": [username], "excludeBannedUsers": False},
         headers=HEADERS
     )
-    resp.raise_for_status()
-    data = resp.json().get("data", [])
+    data = response.json().get("data", [])
     return data[0]["id"] if data else None
 
 def get_avatar_url(user_id):
     return f"https://www.roblox.com/headshot-thumbnail/image?userId={user_id}&width=150&height=150&format=png"
 
 def check_presence(user_id):
-    resp = requests.post(
+    response = requests.post(
         "https://presence.roblox.com/v1/presence/users",
         json={"userIds": [user_id]},
         headers=HEADERS
     )
-    resp.raise_for_status()
-    return resp.json()["userPresences"][0]
+    return response.json()["userPresences"][0]
 
 def get_game_info(universe_id):
-    resp = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}")
-    if resp.ok:
-        data = resp.json().get("data", [])
-        return data[0].get("name") if data else "Unknown Game"
-    return "Unknown Game"
+    try:
+        response = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}")
+        data = response.json().get("data", [])
+        return data[0]["name"] if data else "Unknown Game"
+    except:
+        return "Unknown Game"
 
-def notify_discord(username, user_id, event, status_code, place_id=None, universe_id=None, game_id=None, start_time=None):
-    status_texts = ["Offline", "Online", "In Game", "In Studio", "Invisible"]
-    status = status_texts[status_code] if status_code < len(status_texts) else f"Status {status_code}"
+def format_duration(seconds):
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins}m {secs}s"
+
+def send_discord_embed(username, user_id, event, presence, times):
     now = datetime.utcnow()
-    duration = f"{(now - start_time).seconds // 60}m {(now - start_time).seconds % 60}s" if start_time else "N/A"
+    status = STATUS_MAP.get(presence.get("userPresenceType", 0), "Unknown")
+    place_id = presence.get("placeId")
+    universe_id = presence.get("universeId")
+    game_id = presence.get("gameId")
+
+    duration_online = format_duration(int(times.get("online", 0)))
+    duration_offline = format_duration(int(times.get("offline", 0)))
+    duration_game = format_duration(int(times.get("game", 0)))
 
     fields = [
         {"name": "Event", "value": event, "inline": True},
         {"name": "Status", "value": status, "inline": True},
-        {"name": "Since", "value": start_time.strftime('%Y-%m-%d %H:%M:%S UTC') if start_time else "N/A", "inline": False},
-        {"name": "Session Duration", "value": duration, "inline": True}
+        {"name": "Online Duration", "value": duration_online, "inline": True},
+        {"name": "Offline Duration", "value": duration_offline, "inline": True},
+        {"name": "In-Game Duration", "value": duration_game, "inline": True},
+        {"name": "Timestamp", "value": now.strftime("%Y-%m-%d %H:%M:%S UTC"), "inline": False},
     ]
 
     if place_id:
-        game_url = f"https://www.roblox.com/games/{place_id}"
-        fields.append({"name": "Game Link", "value": f"[Join Game]({game_url})", "inline": False})
+        game_link = f"https://www.roblox.com/games/{place_id}"
+        fields.append({"name": "Game Link", "value": f"[Join Game]({game_link})", "inline": False})
 
     if universe_id:
         game_name = get_game_info(universe_id)
@@ -74,11 +98,11 @@ def notify_discord(username, user_id, event, status_code, place_id=None, univers
         fields.append({"name": "Server ID", "value": game_id, "inline": True})
 
     embed = {
-        "title": f"🔔 {username} Update",
-        "color": 0x00ff00 if status_code != 0 else 0xff0000,
+        "title": f"🔔 {username} Activity Update",
+        "color": 0x00ff00 if presence["userPresenceType"] != 0 else 0xff0000,
         "fields": fields,
-        "footer": {"text": "Roblox Tracker"},
         "thumbnail": {"url": get_avatar_url(user_id)},
+        "footer": {"text": "Roblox Presence Tracker"},
         "timestamp": now.isoformat()
     }
 
@@ -87,45 +111,60 @@ def notify_discord(username, user_id, event, status_code, place_id=None, univers
 def monitor_user(username):
     user_id = get_user_id(username)
     if not user_id:
-        print(f"❌ Could not find user: {username}")
+        print(f"[!] User not found: {username}")
         return
 
-    last_status, last_game, last_game_id = None, None, None
-    start_time = None
+    last_presence_type = None
+    last_timestamp = datetime.utcnow()
+
+    # Time tracking (seconds)
+    times = {
+        "online": 0,
+        "offline": 0,
+        "game": 0
+    }
+
+    user_tracking[username] = {
+        "user_id": user_id,
+        "times": times,
+        "last_status": None
+    }
 
     while True:
         try:
-            data = check_presence(user_id)
-            status = data.get("userPresenceType", 0)
-            place_id = data.get("placeId")
-            universe_id = data.get("universeId")
-            game_id = data.get("gameId")
+            presence = check_presence(user_id)
+            presence_type = presence.get("userPresenceType", 0)
+            current_time = datetime.utcnow()
+            delta = (current_time - last_timestamp).total_seconds()
+            last_timestamp = current_time
 
-            changed = (status != last_status or place_id != last_game or game_id != last_game_id)
+            # Time category update
+            if presence_type == 0:
+                times["offline"] += delta
+            else:
+                times["online"] += delta
+                if presence_type == 2:
+                    times["game"] += delta
 
-            if changed:
-                event = "Status Update"
-                if status == 2 and place_id:
-                    event = "Joined Game"
-                elif status == 0:
-                    event = "Went Offline"
-                elif status == 1:
-                    event = "Online on Website"
-                elif status == 3:
-                    event = "In Studio"
+            # Trigger change event
+            if presence_type != last_presence_type:
+                event = {
+                    0: "Went Offline",
+                    1: "Came Online (Website)",
+                    2: "Joined Game",
+                    3: "Entered Studio",
+                }.get(presence_type, "Status Changed")
 
-                notify_discord(username, user_id, event, status, place_id, universe_id, game_id, start_time or datetime.utcnow())
+                send_discord_embed(username, user_id, event, presence, times)
 
-                last_status = status
-                last_game = place_id
-                last_game_id = game_id
-                start_time = datetime.utcnow()
+                last_presence_type = presence_type
 
         except Exception as e:
             print(f"Error tracking {username}: {e}")
 
         time.sleep(COOLDOWN)
 
+# Launch threads for each user
 if __name__ == "__main__":
     for user in USERNAMES:
         threading.Thread(target=monitor_user, args=(user,), daemon=True).start()
